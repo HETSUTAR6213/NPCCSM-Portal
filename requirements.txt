@@ -3,3 +3,5 @@ Flask-Cors
 python-dotenv
 supabase
 gunicorn
+google-auth
+gspread
