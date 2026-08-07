@@ -1,97 +1,96 @@
 import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# Load secrets from the .env file
-load_dotenv()
-
 app = Flask(__name__)
-# CORS allows your hosted HTML file to talk to this Python server
-CORS(app)
+CORS(app)  # Allows your HTML files to communicate with this API
 
-# Initialize Supabase connection
-url: str = os.environ.get("SUPABASE_URL")
-key: str = os.environ.get("SUPABASE_KEY")
-
-if not url or not key:
-    print("WARNING: Supabase URL or Key is missing. Check your .env file.")
-    
+# Initialize Supabase
+url = os.environ.get("SUPABASE_URL")
+key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
-
-@app.route('/api/syllabus/state', methods=['GET'])
-def get_state():
-    """
-    Called when the frontend loads. Fetches all syllabus progress from Supabase.
-    """
-    try:
-        # Fetch all rows from the syllabus_state table
-        response = supabase.table('syllabus_state').select('*').execute()
-        
-        # Format the data exactly how the HTML JavaScript expects it
-        state_data = {}
-        for row in response.data:
-            state_data[row['subject_code']] = row['data']
-            
-        return jsonify({
-            'status': 'success',
-            'data': state_data
-        }), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/syllabus/update', methods=['POST'])
 def update_syllabus():
-    """
-    Called when a Faculty member clicks "Update & Publish".
-    """
+    data = request.json
+    subject_code = data.get('subject_code')
+    faculty_name = data.get('facultyName')
+    lecture_date = data.get('lastUpdated')
+    
+    # The frontend sends a list of covered topics and a dictionary of notes
+    covered_topics = data.get('coveredTopics', [])
+    topic_notes = data.get('topicNotes', {})
+
     try:
-        payload = request.json
-        subject_code = payload.get('subject_code')
-        
-        if not subject_code:
-            return jsonify({'status': 'error', 'message': 'Missing subject_code'}), 400
-
-        # 1. Update or Insert the current progress into syllabus_state table
-        # Supabase 'upsert' acts just like MongoDB's upsert.
-        supabase.table('syllabus_state').upsert({
-            'subject_code': subject_code,
-            'data': payload
-        }).execute()
-
-        # 2. Insert a permanent log into the update_history table
-        history_entry = {
-            'code': subject_code,
-            'title': payload.get('title'),
-            'date': payload.get('lastUpdated'),
-            'faculty': payload.get('facultyName'),
-            'semester': payload.get('semester')
-        }
-        supabase.table('update_history').insert(history_entry).execute()
-
-        return jsonify({'status': 'success', 'message': 'Saved to Supabase successfully'}), 200
-        
+        # Insert a row for each covered topic
+        for topic in covered_topics:
+            note = topic_notes.get(topic, "")
+            supabase.table('faculty_lecture_updates').insert({
+                "faculty_name": faculty_name,
+                "subject_code": subject_code,
+                "lecture_date": lecture_date,
+                "covered_topic": topic,
+                "mandatory_note": note
+            }).execute()
+            
+        return jsonify({"status": "success", "message": "Successfully updated Supabase"})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/syllabus/state', methods=['GET'])
+def get_syllabus_state():
+    # This endpoint aggregates data so the Principal and Student portals 
+    # can calculate the progress bars and view notes.
+    try:
+        response = supabase.table('faculty_lecture_updates').select("*").execute()
+        records = response.data
+        
+        # Transform the flat SQL rows back into the JSON state object the frontend expects
+        state = {}
+        for row in records:
+            code = row['subject_code']
+            if code not in state:
+                state[code] = {
+                    "coveredTopics": [],
+                    "topicNotes": {},
+                    "facultyName": row['faculty_name'],
+                    "lastUpdated": row['lecture_date']
+                }
+            
+            if row['covered_topic'] not in state[code]['coveredTopics']:
+                state[code]['coveredTopics'].append(row['covered_topic'])
+            
+            if row['mandatory_note']:
+                state[code]['topicNotes'][row['covered_topic']] = row['mandatory_note']
+
+        return jsonify({"status": "success", "data": state})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/history', methods=['GET'])
 def get_history():
-    """
-    Called when clicking "Class Update Logs".
-    Fetches the history from Supabase, ordered newest first.
-    """
+    # Fetches the log history for the Faculty Studio modal
     try:
-        # Fetch history ordered by ID descending (newest on top)
-        response = supabase.table('update_history').select('*').order('id', desc=True).execute()
+        response = supabase.table('faculty_lecture_updates')\
+            .select("subject_code, faculty_name, lecture_date")\
+            .order("lecture_date", desc=True)\
+            .limit(50)\
+            .execute()
         
-        return jsonify({
-            'status': 'success',
-            'data': response.data
-        }), 200
+        history = []
+        for row in response.data:
+            history.append({
+                "code": row['subject_code'],
+                "title": "Academic Subject", # Could be joined from a subjects table
+                "faculty": row['faculty_name'],
+                "date": row['lecture_date'],
+                "semester": "N/A" 
+            })
+            
+        return jsonify({"status": "success", "data": history})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    print("--- NPCCSM Supabase Backend Running ---")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(port=5000, debug=True)
